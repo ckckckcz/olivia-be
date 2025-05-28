@@ -1,8 +1,22 @@
-from flask import Flask, request, jsonify
-from flask_cors import CORS 
+import streamlit as st
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+import uvicorn
+from pydantic import BaseModel
+from typing import Optional
+import threading
 
-app = Flask(__name__)
-CORS(app)  # Enable CORS for all routes
+# FastAPI app for frontend communication
+app = FastAPI()
+
+# Enable CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Data jenis pupuk dan bobotnya
 jenis_pupuk = {
@@ -52,33 +66,107 @@ def hitung_dosis(pupuk_key, tanah_key, produktivitas, luas_lahan):
 
     return dosis
 
-@app.route('/api/rekomendasi_dosis', methods=['POST'])
-def rekomendasi_dosis():
-    data = request.json
-    print("Received data:", data)  # Debug print
+class DosisRequest(BaseModel):
+    pupuk: str
+    tanah: str
+    produktivitas: float
+    luas_lahan: float
+
+# FastAPI endpoint
+@app.post("/api/rekomendasi_dosis")
+async def rekomendasi_dosis(request: DosisRequest):
+    try:
+        if request.pupuk not in jenis_pupuk or request.tanah not in jenis_tanah:
+            return {"error": "Jenis pupuk atau tanah tidak valid"}
+        
+        dosis = hitung_dosis(
+            request.pupuk,
+            request.tanah,
+            request.produktivitas,
+            request.luas_lahan
+        )
+        
+        return {
+            "jenis_pupuk": jenis_pupuk[request.pupuk]["nama"],
+            "jenis_tanah": jenis_tanah[request.tanah]["nama"],
+            "produktivitas": request.produktivitas,
+            "luas_lahan": request.luas_lahan,
+            "dosis_rekomendasi_kg_per_ha": dosis
+        }
+    except Exception as e:
+        print(f"Error: {str(e)}")
+        return {"error": str(e)}
+
+# Streamlit UI
+def main():
+    st.title("Sistem Rekomendasi Dosis Pupuk")
     
-    pupuk = data.get("pupuk")
-    tanah = data.get("tanah")
-    produktivitas = float(data.get("produktivitas", 0))
-    luas_lahan = float(data.get("luas_lahan", 0))
-
-    print(f"Processing: pupuk={pupuk}, tanah={tanah}, produktivitas={produktivitas}, luas_lahan={luas_lahan}")  # Debug print
-
-    if pupuk not in jenis_pupuk or tanah not in jenis_tanah:
-        print(f"Invalid input: pupuk={pupuk in jenis_pupuk}, tanah={tanah in jenis_tanah}")  # Debug print
-        return jsonify({"error": "Jenis pupuk atau tanah tidak valid"}), 400
-
-    dosis = hitung_dosis(pupuk, tanah, produktivitas, luas_lahan)
+    # Input section
+    st.header("Input Data")
+    col1, col2 = st.columns(2)
     
-    result = {
-        "jenis_pupuk": jenis_pupuk[pupuk]["nama"],
-        "jenis_tanah": jenis_tanah[tanah]["nama"],
-        "produktivitas": produktivitas,
-        "luas_lahan": luas_lahan,
-        "dosis_rekomendasi_kg_per_ha": dosis
-    }
-    print("Sending response:", result)  # Debug print
-    return jsonify(result)
+    with col1:
+        pupuk = st.selectbox(
+            "Jenis Pupuk",
+            options=list(jenis_pupuk.keys()),
+            format_func=lambda x: jenis_pupuk[x]["nama"]
+        )
+        produktivitas = st.slider(
+            "Produktivitas Lahan (Skala 1-10)",
+            min_value=0.0,
+            max_value=10.0,
+            value=5.0,
+            step=0.1
+        )
+    
+    with col2:
+        tanah = st.selectbox(
+            "Jenis Tanah",
+            options=list(jenis_tanah.keys()),
+            format_func=lambda x: jenis_tanah[x]["nama"]
+        )
+        luas_lahan = st.slider(
+            "Luas Lahan (Skala 1-10 ha)",
+            min_value=0.0,
+            max_value=10.0,
+            value=5.0,
+            step=0.1
+        )
+    
+    # Calculate button
+    if st.button("Hitung Dosis Pupuk"):
+        dosis = hitung_dosis(pupuk, tanah, produktivitas, luas_lahan)
+        
+        # Results section
+        st.header("Hasil Perhitungan")
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.metric("Dosis Pupuk", f"{dosis:.2f} kg/ha")
+            st.info(f"Jenis Pupuk: {jenis_pupuk[pupuk]['nama']}")
+        
+        with col2:
+            total_dosis = dosis * luas_lahan
+            st.metric("Total Kebutuhan", f"{total_dosis:.2f} kg")
+            st.info(f"Jenis Tanah: {jenis_tanah[tanah]['nama']}")
+        
+        # Show calculation details
+        with st.expander("Detail Perhitungan"):
+            st.write("Bobot yang digunakan:")
+            st.json({
+                "Pupuk": jenis_pupuk[pupuk]["bobot"],
+                "Tanah": jenis_tanah[tanah]["bobot"],
+                "Produktivitas": produktivitas/10,
+                "Luas Lahan": luas_lahan/10
+            })
+
+def run_fastapi():
+    uvicorn.run(app, host="0.0.0.0", port=5001)
 
 if __name__ == "__main__":
-    app.run(port=5001, debug=True)
+    # Run FastAPI in a separate thread
+    api_thread = threading.Thread(target=run_fastapi, daemon=True)
+    api_thread.start()
+    
+    # Run Streamlit
+    main()
